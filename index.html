@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Angry-Birds estilo — Juego de navegador</title>
+  <style>
+    html,body{height:100%;margin:0;background:linear-gradient(#87CEEB,#B0E0E6);font-family:Arial}
+    #gameCanvas{display:block;margin:0 auto;background:transparent}
+    #ui{position:fixed;left:16px;top:16px;color:#222}
+    #score{font-weight:700}
+    button{margin-left:8px;padding:6px 10px;border-radius:6px;border:0;background:#2b8cff;color:#fff}
+    .hint{opacity:.85;margin-top:6px;font-size:13px}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    Puntaje: <span id="score">0</span>
+    <button id="resetBtn">Reiniciar</button>
+    <div class="hint">Arrastra el pájaro y suelta para disparar. Presiona R para reiniciar.</div>
+  </div>
+  <canvas id="gameCanvas" width="1024" height="600"></canvas>
+
+  <!-- Usamos Matter.js desde CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <script>
+  // Juego simple tipo Angry Birds usando Matter.js
+  (function(){
+    const { Engine, Render, Runner, World, Bodies, Mouse, MouseConstraint, Constraint, Events, Composite, Vector } = Matter;
+
+    const canvas = document.getElementById('gameCanvas');
+    const engine = Engine.create();
+    engine.world.gravity.y = 1.0; // gravedad
+
+    const render = Render.create({
+      canvas: canvas,
+      engine: engine,
+      options: {
+        wireframes: false,
+        background: 'transparent',
+        width: canvas.width,
+        height: canvas.height
+      }
+    });
+
+    Render.run(render);
+    const runner = Runner.create();
+    Runner.run(runner, engine);
+
+    const world = engine.world;
+
+    // suelo y plataforma
+    const ground = Bodies.rectangle(512, 590, 1100, 40, { isStatic: true, render:{fillStyle:'#544'}});
+    const platform = Bodies.rectangle(180, 460, 300, 210, { isStatic: true, render:{fillStyle:'#6b8e23'}});
+    World.add(world, [ground, platform]);
+
+    // Slingshot punto fijo
+    const slingPoint = { x: 150, y: 350 };
+
+    // función para crear un bloque (objetivo)
+    function createBlock(x,y,w,h,options={}){
+      return Bodies.rectangle(x,y,w,h,Object.assign({
+        restitution:0.2,
+        friction:0.6,
+        density:0.002,
+        render:{fillStyle:'#8B5A2B'}
+      }, options));
+    }
+
+    // función para crear "cerdito"
+    function createPig(x,y){
+      return Bodies.circle(x,y,22,{
+        label:'pig',
+        restitution:0.5,
+        friction:0.4,
+        density:0.0025,
+        render:{fillStyle:'#6fcf97'}
+      });
+    }
+
+    // estructura de bloques
+    const structures = [];
+    // torre
+    structures.push(createBlock(800,520,40,120));
+    structures.push(createBlock(840,520,40,120));
+    structures.push(createBlock(820,460,120,40));
+    structures.push(createBlock(820,400,120,40));
+    structures.push(createBlock(880,360,60,60));
+
+    // cerdos
+    const pigs = [ createPig(820,360) ];
+
+    World.add(world, structures.concat(pigs));
+
+    // pájaro (projectile)
+    let bird = Bodies.circle(slingPoint.x, slingPoint.y, 20, { density:0.004, friction:0.4, restitution:0.6, label:'bird', render:{fillStyle:'#ff4b4b'} });
+    World.add(world, bird);
+
+    // constraint (resorte) que conecta pájaro al punto del sling
+    let elastic = Constraint.create({ pointA: slingPoint, bodyB: bird, stiffness: 0.02, render:{lineWidth:6,strokeStyle:'#5b2'}});
+    World.add(world, elastic);
+
+    // Mouse control para arrastrar
+    const mouse = Mouse.create(render.canvas);
+    const mouseConstraint = MouseConstraint.create(engine, {
+      mouse: mouse,
+      constraint: { stiffness: 0.02, render: { visible: false } }
+    });
+    World.add(world, mouseConstraint);
+    render.mouse = mouse;
+
+    // variable para controlar cuando soltar el bird
+    let isDraggingBird = false;
+    Events.on(mouseConstraint, 'startdrag', function(e){
+      if(e.body === bird) isDraggingBird = true;
+    });
+    Events.on(mouseConstraint, 'enddrag', function(e){
+      if(e.body === bird){
+        isDraggingBird = false;
+        // al soltar, eliminamos el elastic después de un pequeño delay para dar impulso
+        setTimeout(()=>{
+          World.remove(world, elastic);
+          elastic = null;
+        }, 100);
+      }
+    });
+
+    // cuando el pájaro sale del área, crear uno nuevo tras 1s
+    Events.on(engine, 'afterUpdate', function(){
+      if(!elastic && (bird.position.y > 800 || bird.position.x > 2000 || bird.position.x < -100 || bird.position.y < -100)){
+        spawnNewBird();
+      }
+    });
+
+    // puntuación simple: puntos por eliminar pigs o quitar blocks
+    let score = 0;
+    const scoreEl = document.getElementById('score');
+
+    // chequeo de colisiones para detectar daños en cerdos
+    Events.on(engine, 'collisionStart', function(event){
+      const pairs = event.pairs;
+      pairs.forEach(p => {
+        const labels = [p.bodyA.label, p.bodyB.label];
+        if(labels.includes('pig')){
+          // cálculo simple: si la velocidad relativa es alta, el cerdo "muere"
+          const rel = Vector.magnitude(Vector.sub(p.bodyA.velocity||{x:0,y:0}, p.bodyB.velocity||{x:0,y:0}));
+          if(rel > 4){
+            const pigBody = p.bodyA.label === 'pig' ? p.bodyA : p.bodyB;
+            // evitar sumar dos veces
+            if(!pigBody.isDead){
+              pigBody.isDead = true;
+              World.remove(world, pigBody);
+              score += 500;
+              updateScore();
+            }
+          }
+        }
+      });
+    });
+
+    function updateScore(){ scoreEl.textContent = score; }
+
+    function spawnNewBird(){
+      // quitar viejo bird si sigue en mundo
+      try{ World.remove(world, bird) }catch(e){}
+      bird = Bodies.circle(slingPoint.x, slingPoint.y, 20, { density:0.004, friction:0.4, restitution:0.6, label:'bird', render:{fillStyle:'#ff4b4b'} });
+      World.add(world, bird);
+      // crear nuevo elastic
+      elastic = Constraint.create({ pointA: slingPoint, bodyB: bird, stiffness: 0.02, render:{lineWidth:6,strokeStyle:'#5b2'}});
+      World.add(world, elastic);
+    }
+
+    // Reiniciar escena (sin recargar)
+    function resetScene(){
+      // limpiar mundo y volver a generar
+      World.clear(world, false);
+      Engine.clear(engine);
+      // reañadir suelo y plataforma
+      World.add(world, [ground, platform]);
+      structures.forEach(b => World.add(world, b));
+      pigs.forEach(p => World.add(world, p));
+      score = 0; updateScore();
+      spawnNewBird();
+    }
+
+    document.getElementById('resetBtn').addEventListener('click', ()=>{
+      location.reload();
+    });
+
+    // tecla R para recargar
+    document.addEventListener('keydown', (e)=>{ if(e.key.toLowerCase()==='r') location.reload(); });
+
+    // pequeños toques visuales: dibujar la banda del sling antes de render
+    Events.on(render, 'afterRender', function(){
+      const ctx = render.context;
+      ctx.save();
+      if(elastic){
+        ctx.beginPath();
+        ctx.moveTo(elastic.pointA.x, elastic.pointA.y);
+        const bb = bird.position;
+        ctx.lineTo(bb.x, bb.y);
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = '#5b2';
+        ctx.stroke();
+      }
+      // dibujar punto del sling
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(slingPoint.x, slingPoint.y, 6, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    });
+
+    // Mensaje de ayuda en consola
+    console.log('Juego cargado. Arrastra el pájaro y suelta para disparar. R para reiniciar.');
+
+  })();
+  </script>
+</body>
+</html>
